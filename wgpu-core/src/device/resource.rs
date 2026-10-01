@@ -810,6 +810,7 @@ impl Device {
             | hal::DeviceError::Unexpected => {
                 self.lose(&error.to_string());
             }
+            hal::DeviceError::PendingCommandBufferLimit => {}
         }
         DeviceError::from_hal(error)
     }

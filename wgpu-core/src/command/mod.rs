@@ -796,6 +796,23 @@ impl InnerCommandEncoder {
 
         Ok(self.raw.as_mut())
     }
+
+    /// Like [`Self::open_pass`], for command buffers that `wgpu-core` opens during a submission.
+    ///
+    /// See [`hal::CommandEncoder::begin_internal_encoding`].
+    pub(crate) fn open_internal_pass(
+        &mut self,
+        label: Option<&str>,
+    ) -> Result<&mut dyn hal::DynCommandEncoder, DeviceError> {
+        assert!(!self.is_open);
+
+        let hal_label = hal_label(label, self.device.instance_flags);
+        unsafe { self.raw.begin_internal_encoding(hal_label) }
+            .map_err(|e| self.device.handle_hal_error(e))?;
+        self.is_open = true;
+
+        Ok(self.raw.as_mut())
+    }
 }
 
 impl Drop for InnerCommandEncoder {

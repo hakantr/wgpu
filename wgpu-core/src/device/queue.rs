@@ -529,7 +529,7 @@ impl PendingWrites {
         if !self.is_recording {
             unsafe {
                 self.command_encoder
-                    .begin_encoding(hal_label(
+                    .begin_internal_encoding(hal_label(
                         Some("(wgpu internal) PendingWrites"),
                         self.instance_flags,
                     ))
@@ -1638,7 +1638,7 @@ impl Queue {
                     profiling::scope!("process baked commands");
 
                     // execute resource transitions
-                    if let Err(e) = baked.encoder.open_pass(hal_label(
+                    if let Err(e) = baked.encoder.open_internal_pass(hal_label(
                         Some("(wgpu internal) Transit"),
                         self.device.instance_flags,
                     )) {
@@ -1674,7 +1674,7 @@ impl Queue {
                     }
 
                     if !depth_slice_discards.is_empty() || !used_surface_textures.is_empty() {
-                        if let Err(e) = baked.encoder.open_pass(hal_label(
+                        if let Err(e) = baked.encoder.open_internal_pass(hal_label(
                             Some("(wgpu internal) Finalize"),
                             self.device.instance_flags,
                         )) {

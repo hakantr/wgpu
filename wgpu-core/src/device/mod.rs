@@ -341,6 +341,8 @@ pub enum DeviceError {
     OutOfMemory,
     #[error(transparent)]
     DeviceMismatch(#[from] Box<DeviceMismatch>),
+    #[error("The queue reached its limit of pending command buffers")]
+    PendingCommandBufferLimit,
 }
 
 impl WebGpuError for DeviceError {
@@ -349,6 +351,7 @@ impl WebGpuError for DeviceError {
             Self::DeviceMismatch(e) => e.webgpu_error_type(),
             Self::Lost => ErrorType::DeviceLost,
             Self::OutOfMemory => ErrorType::OutOfMemory,
+            Self::PendingCommandBufferLimit => ErrorType::Internal,
         }
     }
 }
@@ -362,6 +365,7 @@ impl DeviceError {
             hal::DeviceError::Lost => Self::Lost,
             hal::DeviceError::OutOfMemory => Self::OutOfMemory,
             hal::DeviceError::Unexpected => Self::Lost,
+            hal::DeviceError::PendingCommandBufferLimit => Self::PendingCommandBufferLimit,
         }
     }
 }

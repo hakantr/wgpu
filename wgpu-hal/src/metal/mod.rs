@@ -33,7 +33,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{fmt, iter, ops, ptr::NonNull};
+use core::{fmt, iter, num::NonZeroUsize, ops, ptr::NonNull};
 
 use bitflags::bitflags;
 use hashbrown::HashMap;
@@ -483,15 +483,85 @@ impl Queue {
         timestamp_period: f32,
     ) -> Self {
         Self {
-            shared: Arc::new(QueueShared {
-                raw,
-                command_buffer_created_not_submitted: atomic::AtomicUsize::new(0),
-                pending_waits: Mutex::new(Vec::new()),
-                pending_signals: Mutex::new(Vec::new()),
-                relay: OnceCell::new(),
-            }),
+            shared: Arc::new(QueueShared::new(raw, None)),
             timestamp_period,
         }
+    }
+
+    /// Like [`Self::queue_from_raw`], but `begin_encoding` refuses to create a command buffer
+    /// while `pending_limit` command buffers are created and not yet submitted or discarded.
+    ///
+    /// A refusal returns [`crate::DeviceError::PendingCommandBufferLimit`], leaves the count
+    /// unchanged, and allocates nothing. Inside a scope opened with
+    /// [`Self::begin_pending_limit_scope`], the first refusal is recorded as a
+    /// [`PendingLimitFault`].
+    ///
+    /// [`crate::CommandEncoder::begin_internal_encoding`] is counted but never refused, so the
+    /// count can exceed `pending_limit` by the internal command buffers `wgpu-core` has open: one
+    /// for pending writes, and two per command buffer of a submission in progress.
+    ///
+    /// # Safety
+    ///
+    /// The same as [`Self::queue_from_raw`]. In addition, `pending_limit` plus the internal
+    /// command buffers described above must stay below the `maxCommandBufferCount` of `raw`, and
+    /// command buffers created on `raw` outside this queue must not hold the rest of that capacity
+    /// unsubmitted. Otherwise Metal can block inside command buffer creation.
+    pub unsafe fn queue_from_raw_with_pending_limit(
+        raw: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        timestamp_period: f32,
+        pending_limit: NonZeroUsize,
+    ) -> Self {
+        Self {
+            shared: Arc::new(QueueShared::new(raw, Some(pending_limit))),
+            timestamp_period,
+        }
+    }
+
+    /// The limit given to [`Self::queue_from_raw_with_pending_limit`].
+    pub fn pending_limit(&self) -> Option<NonZeroUsize> {
+        self.shared.pending_limit.as_ref().map(|limit| limit.limit)
+    }
+
+    /// Command buffers created by this queue's encoders and not yet submitted or discarded.
+    pub fn pending_command_buffers(&self) -> usize {
+        self.shared
+            .command_buffer_created_not_submitted
+            .load(atomic::Ordering::Acquire)
+    }
+
+    /// Starts recording the first [`PendingLimitFault`] of this queue.
+    ///
+    /// Clears the fault of any earlier scope. Scopes do not nest.
+    pub fn begin_pending_limit_scope(&self) -> Result<(), PendingLimitScopeError> {
+        let limit = self
+            .shared
+            .pending_limit
+            .as_ref()
+            .ok_or(PendingLimitScopeError::NoPendingLimit)?;
+        let mut scope = limit.scope.lock();
+        if scope.active {
+            return Err(PendingLimitScopeError::AlreadyActive);
+        }
+        scope.active = true;
+        scope.first_fault = None;
+        Ok(())
+    }
+
+    /// Ends the scope started by [`Self::begin_pending_limit_scope`] and returns its first fault.
+    pub fn end_pending_limit_scope(
+        &self,
+    ) -> Result<Option<PendingLimitFault>, PendingLimitScopeError> {
+        let limit = self
+            .shared
+            .pending_limit
+            .as_ref()
+            .ok_or(PendingLimitScopeError::NoPendingLimit)?;
+        let mut scope = limit.scope.lock();
+        if !scope.active {
+            return Err(PendingLimitScopeError::NotActive);
+        }
+        scope.active = false;
+        Ok(scope.first_fault.take())
     }
 
     pub fn as_raw(&self) -> &ProtocolObject<dyn MTLCommandQueue> {
@@ -631,9 +701,85 @@ pub struct QueueShared {
     // to create command buffers for internal purposes. In those cases we always
     // commit the buffer immediately, so we don't adjust the counter for them.)
     command_buffer_created_not_submitted: atomic::AtomicUsize,
+    pending_limit: Option<PendingLimit>,
     pending_waits: PendingEvents,
     pending_signals: PendingEvents,
     relay: OnceCell<Relay>,
+}
+
+impl QueueShared {
+    fn new(
+        raw: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        pending_limit: Option<NonZeroUsize>,
+    ) -> Self {
+        Self {
+            raw,
+            command_buffer_created_not_submitted: atomic::AtomicUsize::new(0),
+            pending_limit: pending_limit.map(|limit| PendingLimit {
+                limit,
+                scope: Mutex::new(PendingLimitScope::default()),
+            }),
+            pending_waits: Mutex::new(Vec::new()),
+            pending_signals: Mutex::new(Vec::new()),
+            relay: OnceCell::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PendingLimit {
+    limit: NonZeroUsize,
+    scope: Mutex<PendingLimitScope>,
+}
+
+#[derive(Debug, Default)]
+struct PendingLimitScope {
+    active: bool,
+    first_fault: Option<PendingLimitFault>,
+}
+
+impl PendingLimit {
+    /// Reserves one command buffer only while the count is below the limit.
+    fn reserve(&self, count: &atomic::AtomicUsize) -> Result<(), crate::DeviceError> {
+        let limit = self.limit.get();
+        match count.fetch_update(
+            atomic::Ordering::AcqRel,
+            atomic::Ordering::Acquire,
+            |current| (current < limit).then_some(current + 1),
+        ) {
+            Ok(_) => Ok(()),
+            Err(outstanding) => {
+                let mut scope = self.scope.lock();
+                if scope.active && scope.first_fault.is_none() {
+                    scope.first_fault = Some(PendingLimitFault { limit, outstanding });
+                }
+                Err(crate::DeviceError::PendingCommandBufferLimit)
+            }
+        }
+    }
+}
+
+/// A command buffer refused by a queue created with
+/// [`Queue::queue_from_raw_with_pending_limit`].
+///
+/// No command buffer was allocated, and the device is not lost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingLimitFault {
+    /// The limit of the queue.
+    pub limit: usize,
+    /// Pending command buffers at the time of the refusal.
+    pub outstanding: usize,
+}
+
+/// Misuse of the pending limit scope of a [`Queue`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PendingLimitScopeError {
+    #[error("The queue has no pending command buffer limit")]
+    NoPendingLimit,
+    #[error("A pending limit scope is already active")]
+    AlreadyActive,
+    #[error("No pending limit scope is active")]
+    NotActive,
 }
 
 #[derive(Debug)]

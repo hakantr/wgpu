@@ -410,6 +410,8 @@ pub enum DeviceError {
     Lost,
     #[error("Unexpected error variant (driver implementation is at fault)")]
     Unexpected,
+    #[error("The queue reached its limit of pending command buffers")]
+    PendingCommandBufferLimit,
 }
 
 #[cfg(any(dx12, vulkan))]
@@ -1449,6 +1451,19 @@ pub trait CommandEncoder: WasmNotSendSync + fmt::Debug {
     ///
     /// This `CommandEncoder` must be in the "closed" state.
     unsafe fn begin_encoding(&mut self, label: Label) -> Result<(), DeviceError>;
+
+    /// Like [`Self::begin_encoding`], for command buffers that `wgpu-core` opens for its own
+    /// bookkeeping: pending writes, and the transition and finalize buffers of a submission.
+    ///
+    /// Backends that limit pending command buffers per queue count these but do not reject them,
+    /// because `wgpu-core` cannot recover from a failure at those points without losing the device.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`Self::begin_encoding`].
+    unsafe fn begin_internal_encoding(&mut self, label: Label) -> Result<(), DeviceError> {
+        unsafe { self.begin_encoding(label) }
+    }
 
     /// Discard the command list under construction.
     ///

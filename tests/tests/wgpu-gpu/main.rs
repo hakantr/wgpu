@@ -42,6 +42,8 @@ mod external_texture;
 mod float32_filterable;
 mod image_atomics;
 mod immediates;
+#[cfg(target_vendor = "apple")]
+mod imported_queue_pending_limit;
 mod instance;
 mod life_cycle;
 mod mesh_shader;
@@ -117,6 +119,8 @@ fn all_tests() -> Vec<wgpu_test::GpuTestInitializer> {
     external_texture::all_tests(&mut tests);
     float32_filterable::all_tests(&mut tests);
     image_atomics::all_tests(&mut tests);
+    #[cfg(target_vendor = "apple")]
+    imported_queue_pending_limit::all_tests(&mut tests);
     instance::all_tests(&mut tests);
     life_cycle::all_tests(&mut tests);
     mesh_shader::all_tests(&mut tests);

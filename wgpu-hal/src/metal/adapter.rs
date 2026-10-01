@@ -13,7 +13,7 @@ use wgt::{AstcBlock, AstcChannel};
 
 use alloc::{string::ToString as _, sync::Arc, vec::Vec};
 use core::ptr::NonNull;
-use wgpu_sync::{atomic, Mutex, OnceCell};
+use wgpu_sync::atomic;
 
 use crate::metal::QueueShared;
 
@@ -160,13 +160,7 @@ impl crate::Adapter for super::Adapter {
                     limits: limits.clone(),
                 },
                 queue: super::Queue {
-                    shared: Arc::new(QueueShared {
-                        raw: queue,
-                        command_buffer_created_not_submitted: atomic::AtomicUsize::new(0),
-                        pending_waits: Mutex::new(Vec::new()),
-                        pending_signals: Mutex::new(Vec::new()),
-                        relay: OnceCell::new(),
-                    }),
+                    shared: Arc::new(QueueShared::new(queue, None)),
                     timestamp_period,
                 },
             })

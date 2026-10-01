@@ -475,17 +475,10 @@ impl super::CommandState {
     }
 }
 
-impl crate::CommandEncoder for super::CommandEncoder {
-    type A = super::Api;
-
-    unsafe fn begin_encoding(&mut self, label: crate::Label) -> Result<(), crate::DeviceError> {
-        let queue = &self.queue_shared.raw;
-        let retain_references = self.shared.settings.retain_command_buffer_references;
-        let relay = self.queue_shared.relay.get();
-
-        // Guard against exhausting Metal's command buffer budget. Use the hard
-        // limit (`MAX_COMMAND_BUFFERS`) so we fail before Metal can hang inside
-        // `new_command_buffer`.
+impl super::CommandEncoder {
+    /// Counts one command buffer against the hard limit (`MAX_COMMAND_BUFFERS`), so creation fails
+    /// before Metal can hang inside `new_command_buffer`.
+    fn reserve_command_buffer(&mut self) -> Result<(), crate::DeviceError> {
         let previous = self
             .queue_shared
             .command_buffer_created_not_submitted
@@ -501,6 +494,16 @@ impl crate::CommandEncoder for super::CommandEncoder {
             );
             return Err(crate::DeviceError::Lost);
         }
+        Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// One command buffer must already be reserved, and the encoder must be closed.
+    unsafe fn allocate_command_buffer(&mut self, label: crate::Label) {
+        let queue = &self.queue_shared.raw;
+        let retain_references = self.shared.settings.retain_command_buffer_references;
+        let relay = self.queue_shared.relay.get();
 
         let raw = autoreleasepool(move |_| {
             let cmd_buf_ref = if retain_references {
@@ -528,7 +531,29 @@ impl crate::CommandEncoder for super::CommandEncoder {
         debug_assert!(self.state.pending_timer_queries.is_empty());
 
         self.raw_cmd_buf = Some(raw);
+    }
+}
 
+impl crate::CommandEncoder for super::CommandEncoder {
+    type A = super::Api;
+
+    unsafe fn begin_encoding(&mut self, label: crate::Label) -> Result<(), crate::DeviceError> {
+        match &self.queue_shared.pending_limit {
+            Some(pending_limit) => {
+                pending_limit.reserve(&self.queue_shared.command_buffer_created_not_submitted)?
+            }
+            None => self.reserve_command_buffer()?,
+        }
+        unsafe { self.allocate_command_buffer(label) };
+        Ok(())
+    }
+
+    unsafe fn begin_internal_encoding(
+        &mut self,
+        label: crate::Label,
+    ) -> Result<(), crate::DeviceError> {
+        self.reserve_command_buffer()?;
+        unsafe { self.allocate_command_buffer(label) };
         Ok(())
     }
 

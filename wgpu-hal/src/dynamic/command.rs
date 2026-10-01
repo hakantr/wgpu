@@ -18,6 +18,8 @@ use super::{
 pub trait DynCommandEncoder: DynResource + core::fmt::Debug {
     unsafe fn begin_encoding(&mut self, label: Label) -> Result<(), DeviceError>;
 
+    unsafe fn begin_internal_encoding(&mut self, label: Label) -> Result<(), DeviceError>;
+
     unsafe fn discard_encoding(&mut self);
 
     unsafe fn end_encoding(&mut self) -> Result<Box<dyn DynCommandBuffer>, DeviceError>;
@@ -237,6 +239,10 @@ pub trait DynCommandEncoder: DynResource + core::fmt::Debug {
 impl<C: CommandEncoder + DynResource> DynCommandEncoder for C {
     unsafe fn begin_encoding(&mut self, label: Label) -> Result<(), DeviceError> {
         unsafe { C::begin_encoding(self, label) }
+    }
+
+    unsafe fn begin_internal_encoding(&mut self, label: Label) -> Result<(), DeviceError> {
+        unsafe { C::begin_internal_encoding(self, label) }
     }
 
     unsafe fn discard_encoding(&mut self) {
